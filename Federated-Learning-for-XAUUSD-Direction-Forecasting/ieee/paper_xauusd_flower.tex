@@ -1,0 +1,243 @@
+\documentclass[conference]{IEEEtran}
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{url}
+
+\graphicspath{{figures/}}
+
+\title{Federated Learning for XAUUSD Direction Forecasting Using Flower and PyTorch}
+
+\author{
+\IEEEauthorblockN{CSE711 Project Team}
+\IEEEauthorblockA{
+Department of Computer Science and Engineering\\
+University Project Report\\
+Replace this line with author names, student IDs, and institutional email addresses before submission
+}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Federated learning (FL) enables collaborative model training without centralizing raw data, making it attractive for privacy-sensitive financial applications. This paper presents a Flower-based FL system for binary direction forecasting on XAUUSD using a tabular time-series dataset of 2,715 daily observations spanning March 2015 to December 2025. The feature space contains 25 engineered technical indicators and lagged return variables, and the prediction target indicates whether the next directional movement is upward or downward. To emulate a decentralized environment, the chronological training pool is partitioned into three non-overlapping clients representing distinct market periods, while the final 15\% of the timeline is reserved as a held-out global test set. The underlying predictor is a lightweight multilayer perceptron implemented in PyTorch and trained under the Flower FedAvg strategy for 30 communication rounds.
+
+The resulting Flower deployment is compared against centralized learning and client-specific local-only baselines. The federated model achieves 57.35\% test accuracy and a ROC-AUC of 54.41\%, slightly outperforming the centralized baseline in both accuracy and ranking quality while also improving robustness relative to isolated local training. Although the predictive margins are modest, the study shows that an existing PyTorch forecasting pipeline can be migrated to a practical FL framework with limited structural changes. The paper also documents important limitations, including simulated rather than physically distributed clients and the use of shared preprocessing statistics across the training pool.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Federated learning, Flower, XAUUSD, financial time series, PyTorch, FedAvg, binary classification.
+\end{IEEEkeywords}
+
+\section{Introduction}
+Financial time-series forecasting is typically performed in a centralized training pipeline in which data from multiple sources are aggregated before modeling. This workflow is often unsuitable when raw data cannot be pooled because of privacy, regulation, organizational boundaries, or system ownership constraints. Federated learning addresses this challenge by moving model training to local data silos and exchanging model updates instead of raw records \cite{mcmahan2017,kairouz2021}.
+
+This project investigates whether a standard tabular forecasting workflow for XAUUSD can be adapted to a federated learning framework with minimal disruption to the original model code. The task is binary direction prediction based on engineered technical indicators and lagged returns. The implementation goal is not only to measure predictive performance, but also to demonstrate an end-to-end migration from a manual federated averaging loop to a recognized FL framework, namely Flower \cite{beutel2020}.
+
+The main contributions of this work are as follows:
+\begin{enumerate}
+    \item A Flower-based federated training pipeline for XAUUSD directional forecasting using a PyTorch multilayer perceptron.
+    \item A chronological multi-client evaluation protocol that simulates heterogeneous market regimes by partitioning the training set into non-overlapping time periods.
+    \item A comparative analysis between federated, centralized, and local-only training regimes using the same feature engineering and model architecture.
+\end{enumerate}
+
+\section{Related Work}
+Federated learning was formalized as a decentralized training paradigm in which a central coordinator aggregates locally trained models rather than raw client data \cite{mcmahan2017}. FedAvg remains one of the most widely used aggregation strategies because of its conceptual simplicity and strong empirical baseline performance. However, prior work has shown that statistical and system heterogeneity can complicate convergence in realistic FL deployments \cite{li2020}.
+
+At the systems level, practical FL experimentation benefits from frameworks that reduce implementation overhead while preserving flexibility. Flower is designed to support heterogeneous clients and straightforward integration with existing machine learning workloads \cite{beutel2020}. This characteristic is particularly useful in project settings where the goal is to migrate a pre-existing PyTorch pipeline into a federated framework without rewriting the underlying model.
+
+In the broader FL literature, open challenges remain in optimization, evaluation, privacy guarantees, and realistic client simulation \cite{kairouz2021}. The present study should therefore be interpreted as a framework-oriented experimental prototype rather than a privacy-certified deployment.
+
+\section{Dataset and Experimental Protocol}
+\subsection{Dataset Description}
+The dataset used in this study consists of 2,715 daily XAUUSD observations from 2015-03-16 to 2025-12-30. Each row contains 25 numerical predictors along with a binary target and a timestamp. The predictors include:
+\begin{itemize}
+    \item return-based features: 1-day, 5-day, and 10-day returns plus lagged returns,
+    \item moving-average features: SMA and EMA deviations over multiple windows,
+    \item volatility descriptors over 5, 10, and 20 periods,
+    \item technical indicators: RSI, MACD, MACD signal, MACD histogram, and Bollinger-band position,
+    \item candle and activity features: high-low range, close-open spread, and normalized volume.
+\end{itemize}
+
+The target is a binary directional label. Over the full dataset, the positive class rate is 53.11\%. The held-out test set is slightly more imbalanced, with 239 positive samples and 169 negative samples.
+
+\subsection{Chronological Partitioning}
+The experiment uses a strict chronological split to avoid look-ahead leakage. The first 85\% of the timeline (2,307 rows) forms the training pool, and the final 15\% (408 rows) forms the global test set. The training pool is then divided into three equal chronological client partitions, each containing 769 samples. Table~\ref{tab:clients} summarizes the simulated clients.
+
+\begin{table}[!t]
+\caption{Chronological Client Partitions}
+\label{tab:clients}
+\centering
+\begin{tabular}{c c c c}
+\toprule
+Client & Start Date & End Date & Up Rate \\
+\midrule
+0 & 2015-03-16 & 2018-04-06 & 0.498 \\
+1 & 2018-04-09 & 2021-04-27 & 0.529 \\
+2 & 2021-04-28 & 2024-05-16 & 0.537 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This partitioning induces a realistic non-IID structure because each client corresponds to a different market period rather than a random shard of pooled data.
+
+\subsection{Preprocessing}
+All 25 input features are standardized using a \texttt{StandardScaler} fit on the training pool. This design choice preserves comparability across all baselines and reflects the structure of the implemented code. However, it is not a strict federated preprocessing pipeline because client-local normalization statistics are not maintained separately. This limitation is explicitly acknowledged when interpreting the reported results.
+
+\section{Federated Learning Methodology}
+\subsection{Prediction Model}
+The classifier is a three-layer multilayer perceptron implemented in PyTorch \cite{paszke2019}. Given an input vector $\mathbf{x} \in \mathbb{R}^{25}$, the network applies two hidden layers with ReLU activations and dropout regularization:
+\begin{equation}
+\hat{y} = f(\mathbf{x}; \theta),
+\end{equation}
+where the layer dimensions are $25 \rightarrow 64 \rightarrow 32 \rightarrow 1$. The final scalar output is treated as a logit, and the binary cross-entropy with logits loss is minimized during local training:
+\begin{equation}
+\mathcal{L}(\theta) = - \frac{1}{N}\sum_{i=1}^{N} \left[y_i \log \sigma(z_i) + (1-y_i)\log(1-\sigma(z_i))\right],
+\end{equation}
+where $z_i$ denotes the model logit and $\sigma(\cdot)$ is the sigmoid function.
+
+\subsection{Flower-Based Federated Training}
+The manual federated averaging loop from the original project was replaced by Flower client and server abstractions. Each client is implemented as a Flower \texttt{NumPyClient} that:
+\begin{itemize}
+    \item receives the current global model parameters,
+    \item performs local training on its partition for a fixed number of epochs,
+    \item returns updated model parameters and local evaluation metrics.
+\end{itemize}
+
+The server uses Flower's FedAvg strategy to aggregate client models. If $\theta_k^{(t+1)}$ is the locally updated parameter vector from client $k$ at round $t+1$ and $n_k$ is the client sample count, the aggregated model is:
+\begin{equation}
+\theta^{(t+1)} = \sum_{k=1}^{K} \frac{n_k}{\sum_{j=1}^{K} n_j}\theta_k^{(t+1)}.
+\end{equation}
+
+The experiment uses full client participation in every round, so $K=3$ for all updates. Training is conducted for 30 communication rounds with 3 local epochs per round, learning rate $10^{-3}$, and batch size 64.
+
+\subsection{Baselines and Metrics}
+Three training regimes are compared:
+\begin{enumerate}
+    \item \textbf{Federated (FedAvg):} Flower-based FL over the three simulated clients.
+    \item \textbf{Centralized:} the same model trained on the union of all client data.
+    \item \textbf{Local-only:} one model trained independently per client without federation.
+\end{enumerate}
+
+Performance is measured on the same held-out global test set using accuracy, precision, recall, F1-score, ROC-AUC, and binary cross-entropy loss.
+
+\section{Results and Discussion}
+\subsection{Convergence Behavior}
+Fig.~\ref{fig:convergence} illustrates the global test accuracy, ROC-AUC, and loss across Flower communication rounds. The federated model improves sharply after the first few rounds and then stabilizes, with the final model reaching 57.35\% accuracy and 54.41\% ROC-AUC. Although the convergence pattern is not monotonic, it remains stable enough for this small-scale three-client configuration.
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=0.95\textwidth]{fl_convergence.png}
+\caption{Flower FedAvg convergence over 30 communication rounds on the held-out global test set.}
+\label{fig:convergence}
+\end{figure*}
+
+Fig.~\ref{fig:perclient} compares each client's post-local-update accuracy with the aggregated global model across rounds. The figure highlights client-specific variability arising from non-overlapping market regimes. Aggregation generally reduces the instability of isolated local updates and produces a more consistent global trend.
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=0.88\textwidth]{per_client_accuracy.png}
+\caption{Per-client post-local-update accuracy versus aggregated global-model accuracy across communication rounds.}
+\label{fig:perclient}
+\end{figure*}
+
+\subsection{Final Test Performance}
+Table~\ref{tab:results} reports the final comparison among centralized, federated, and local-only models. The Flower FedAvg model achieves the best accuracy and the best ROC-AUC among all tested settings. It slightly exceeds centralized training in accuracy (57.35\% vs.\ 56.86\%) and improves ranking quality more clearly in ROC-AUC (54.41\% vs.\ 52.08\%).
+
+\begin{table*}[!t]
+\caption{Final Global Test Performance Comparison}
+\label{tab:results}
+\centering
+\begin{tabular}{l c c c c c c}
+\toprule
+Setting & Accuracy & Precision & Recall & F1-score & ROC-AUC & Loss \\
+\midrule
+Centralized & 0.5686 & 0.6054 & 0.7573 & 0.6729 & 0.5208 & 0.6920 \\
+Federated (FedAvg) & \textbf{0.5735} & \textbf{0.6226} & 0.6904 & 0.6548 & \textbf{0.5441} & 0.6955 \\
+Local-only Client 0 & 0.4314 & 0.5538 & 0.1506 & 0.2368 & 0.5140 & 0.7465 \\
+Local-only Client 1 & 0.5637 & 0.6041 & 0.7406 & 0.6654 & 0.5275 & \textbf{0.6915} \\
+Local-only Client 2 & 0.5319 & 0.6017 & 0.5941 & 0.5979 & 0.5317 & 0.7124 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+The results suggest three important observations:
+\begin{enumerate}
+    \item \textbf{Federation is beneficial relative to isolated training.} The local-only models show higher variance and weaker generalization, especially Client 0, which performs poorly on the later held-out test period.
+    \item \textbf{The predictive gains are modest.} All ROC-AUC values are close to 0.5, indicating that the prediction task remains difficult and that the model is only slightly better than random ranking.
+    \item \textbf{Temporal heterogeneity matters.} Since each client corresponds to a different historical period, local models can become specialized to regime-specific dynamics and struggle to generalize to the future test interval.
+\end{enumerate}
+
+Fig.~\ref{fig:comparison} visualizes the centralized, federated, and local-only results, while Fig.~\ref{fig:cm} presents the confusion matrix for the final federated model. The federated classifier identifies a substantial fraction of upward movements, but its performance on downward movements remains limited, which is consistent with the class balance and modest ROC-AUC.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\linewidth]{comparison_bar.png}
+\caption{Comparison of accuracy and ROC-AUC across training regimes.}
+\label{fig:comparison}
+\end{figure}
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\linewidth]{cm_federated.png}
+\caption{Confusion matrix of the final federated global model on the held-out test set.}
+\label{fig:cm}
+\end{figure}
+
+\section{Threats to Validity and Limitations}
+Several limitations should be considered when interpreting the results:
+\begin{itemize}
+    \item \textbf{Simulated federation:} the three clients are logical partitions within a single environment rather than independent institutions or devices.
+    \item \textbf{Shared preprocessing statistics:} normalization is fit globally on the training pool, which simplifies experimentation but weakens strict FL realism.
+    \item \textbf{Small client count:} only three clients are used, which is useful for demonstration but does not fully capture large-scale federated behavior.
+    \item \textbf{Model simplicity:} the MLP is computationally light and appropriate for framework migration, but it may underfit complex temporal structure in gold-price dynamics.
+    \item \textbf{No privacy mechanism:} the study uses Flower for federated orchestration, but it does not implement secure aggregation, differential privacy, or adversarial robustness measures.
+\end{itemize}
+
+These constraints do not invalidate the experiment, but they frame it correctly as a reproducible educational FL prototype rather than a production-ready financial decision system.
+
+\section{Conclusion}
+This paper presented a Flower-based federated learning implementation for XAUUSD directional forecasting using a PyTorch multilayer perceptron and a time-ordered tabular feature set. The migration from a manual federated averaging pipeline to the Flower framework required only limited structural changes to the modeling code, demonstrating the framework's practical value for existing machine learning workloads.
+
+Empirically, the Flower FedAvg model achieved 57.35\% test accuracy and 54.41\% ROC-AUC, slightly outperforming centralized training and providing more stable generalization than local-only baselines. The gains are moderate, which reflects the difficulty of financial direction prediction and the non-IID nature of chronological client partitions. Future work should investigate client-local preprocessing, more expressive temporal architectures, larger numbers of simulated participants, and privacy-enhancing mechanisms such as secure aggregation and differential privacy.
+
+\begin{thebibliography}{99}
+
+\bibitem{mcmahan2017}
+H.~B. McMahan, E.~Moore, D.~Ramage, S.~Hampson, and B.~A. y Arcas,
+``Communication-efficient learning of deep networks from decentralized data,''
+in \emph{Proc. 20th Int. Conf. Artificial Intelligence and Statistics (AISTATS)},
+Fort Lauderdale, FL, USA, 2017, pp.~1273--1282.
+
+\bibitem{kairouz2021}
+P.~Kairouz \emph{et al.},
+``Advances and open problems in federated learning,''
+\emph{Foundations and Trends in Machine Learning}, vol.~14, no.~1--2,
+pp.~1--210, 2021.
+
+\bibitem{li2020}
+T.~Li, A.~K. Sahu, M.~Zaheer, M.~Sanjabi, A.~Talwalkar, and V.~Smith,
+``Federated optimization in heterogeneous networks,''
+in \emph{Proc. 3rd Conf. Machine Learning and Systems (MLSys)},
+Austin, TX, USA, 2020.
+
+\bibitem{beutel2020}
+D.~J. Beutel, T.~Topal, A.~Mathur, X.~Qiu, J.~Fernandez-Marques,
+Y.~Gao, L.~Sani, K.~H. Li, T.~Parcollet, P.~P. B. de Gusm\~ao, and N.~D. Lane,
+``Flower: A friendly federated learning research framework,''
+\emph{arXiv preprint arXiv:2007.14390}, 2020.
+
+\bibitem{paszke2019}
+A.~Paszke \emph{et al.},
+``PyTorch: An imperative style, high-performance deep learning library,''
+in \emph{Advances in Neural Information Processing Systems (NeurIPS)},
+vol.~32, 2019.
+
+\end{thebibliography}
+
+\end{document}
